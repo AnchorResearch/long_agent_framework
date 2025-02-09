@@ -12,6 +12,23 @@ import shutil
 import os
 import requests
 import psutil
+import contextlib
+import signal
+
+@contextlib.contextmanager
+def timeout(seconds):
+    def signal_handler(signum, frame):
+        raise TimeoutError("Execution timed out")
+    
+    # Set up the signal handler
+    signal.signal(signal.SIGALRM, signal_handler)
+    signal.alarm(seconds)
+    
+    try:
+        yield
+    finally:
+        # Disable the alarm
+        signal.alarm(0)
 
 @dataclass
 class CodingTask:
@@ -21,6 +38,7 @@ class CodingTask:
     constraint: str
     time_budget: float  # in minutes
     test_cases: List[Dict[str, Any]]
+    evaluation: str
 
 @dataclass
 class TaskResult:
@@ -114,18 +132,28 @@ class CodeQualityScorer:
             # Create namespace for function execution
             namespace = {}
             
-            # Execute the function code
-            exec(code, namespace)
+            # Execute the function code with timeout
+            self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Executing function code")
+            exec_start = time.time()
+            try:
+                with timeout(10):  # 10 second timeout
+                    exec(code, namespace)
+                exec_time = time.time() - exec_start
+                self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Function code execution completed in {exec_time:.3f}s")
+            except TimeoutError:
+                exec_time = time.time() - exec_start
+                self.logger.error(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Function code execution timed out after {exec_time:.3f}s")
+                return 0.0
             
             # Get function object
             match = re.search(r'def\s+(\w+)', code)
             if not match:
-                self.logger.error("Could not find function definition in code")
+                self.logger.error(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Could not find function definition in code")
                 return 0.0
                 
             func_name = match.group(1)
             if func_name not in namespace:
-                self.logger.error(f"Function {func_name} not found in namespace")
+                self.logger.error(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Function {func_name} not found in namespace")
                 return 0.0
                 
             func = namespace[func_name]
@@ -134,10 +162,11 @@ class CodeQualityScorer:
             passed = 0
             total = len(test_cases)
             
-            self.logger.info("\nTest Execution Results:")
+            self.logger.info(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Test Execution Results:")
             self.logger.info("----------------------")
             
             for i, test in enumerate(test_cases, 1):
+                test_start = time.time()
                 try:
                     result = func(**test['input'])
                     expected = test['expected']
@@ -156,30 +185,34 @@ class CodeQualityScorer:
                         test_passed = result == expected
                     
                     passed += float(test_passed)
-                    self.logger.info(f"Test {i}:")
+                    test_time = time.time() - test_start
+                    self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Test {i}:")
                     self.logger.info(f"  Input: {test['input']}")
                     self.logger.info(f"  Expected: {expected}")
                     self.logger.info(f"  Got: {result}")
-                    self.logger.info(f"  Status: {'PASS' if test_passed else 'FAIL'}\n")
+                    self.logger.info(f"  Status: {'PASS' if test_passed else 'FAIL'}")
+                    self.logger.info(f"  Time: {test_time:.3f}s\n")
                         
                 except Exception as e:
                     expected = test['expected']
                     result = e
                     test_passed = isinstance(result, type(expected))
                     passed += float(test_passed)
-                    self.logger.error(f"Test {i}:")
+                    test_time = time.time() - test_start
+                    self.logger.error(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Test {i}:")
                     self.logger.error(f"  Input: {test['input']}")
                     self.logger.error(f"  Expected: {expected}")
                     self.logger.error(f"  Got: {result}")
-                    self.logger.error(f"  Status: {'PASS' if test_passed else 'FAIL'}\n")
+                    self.logger.error(f"  Status: {'PASS' if test_passed else 'FAIL'}")
+                    self.logger.error(f"  Time: {test_time:.3f}s")
                     self.logger.error(f"  Error: {str(e)}\n")
                     
             score = passed / total if total > 0 else 0.0
-            self.logger.info(f"Overall Test Score: {score:.2f} ({int(passed)}/{total} tests passed)")
+            self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Overall Test Score: {score:.2f} ({int(passed)}/{total} tests passed)")
             return score
             
         except Exception as e:
-            self.logger.error(f"Error in test execution: {str(e)}")
+            self.logger.error(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Error in test execution: {str(e)}")
             return 0.0
 
     def _check_code_style(self, code: str) -> float:
@@ -310,69 +343,115 @@ class CodeQualityScorer:
 
     def score_code(self, code: str, test_cases: List[Dict]) -> float:
         """Calculate overall code quality score"""
-
-        print("Code:")
-        print(code)
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting code quality evaluation")
 
         if not code or code.startswith('# Error'):
+            self.logger.warning(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Invalid or empty code provided")
             return 0.0
             
-        scores = {
-            'test_passing': self._run_test_cases(code, test_cases),
-            'code_style': self._check_code_style(code),
-            'efficiency': self._estimate_efficiency(code)
-        }
+        scores = {}
+        
+        # Run test cases
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Running test cases")
+        test_start = time.time()
+        scores['test_passing'] = self._run_test_cases(code, test_cases)
+        test_time = time.time() - test_start
+        
+        # Check code style
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Evaluating code style")
+        style_start = time.time()
+        scores['code_style'] = self._check_code_style(code)
+        style_time = time.time() - style_start
+        
+        # Check efficiency
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Evaluating code efficiency")
+        efficiency_start = time.time()
+        scores['efficiency'] = self._estimate_efficiency(code)
+        efficiency_time = time.time() - efficiency_start
 
-        print("Scores:")
-        print(scores)
+        # Log individual scores and timing
+        self.logger.info(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Evaluation Results:")
+        self.logger.info(f"  Test Score: {scores['test_passing']:.2f} (took {test_time:.2f}s)")
+        self.logger.info(f"  Style Score: {scores['code_style']:.2f} (took {style_time:.2f}s)")
+        self.logger.info(f"  Efficiency Score: {scores['efficiency']:.2f} (took {efficiency_time:.2f}s)")
         
-        # Log individual scores for debugging
-        self.logger.info("Individual scores:")
-        for metric, score in scores.items():
-            self.logger.info(f"  {metric}: {score:.2f}")
+        # Calculate final weighted score
+        final_score = sum(score * self.metrics[metric] 
+                       for metric, score in scores.items())
         
-        return sum(score * self.metrics[metric] 
-                  for metric, score in scores.items())
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Final Score: {final_score:.2f}")
+        return final_score
+
+    def get_detailed_scores(self, code: str, test_cases: List[Dict]) -> Dict[str, float]:
+        """Get detailed scores for each metric"""
+        if not code or code.startswith('# Error'):
+            return {
+                'test_passing': 0.0,
+                'code_style': 0.0,
+                'efficiency': 0.0
+            }
+            
+        scores = {}
+        
+        # Run test cases
+        scores['test_passing'] = self._run_test_cases(code, test_cases)
+        
+        # Check code style
+        scores['code_style'] = self._check_code_style(code)
+        
+        # Check efficiency
+        scores['efficiency'] = self._estimate_efficiency(code)
+        
+        return scores
 
 class AIDEAgent:
-    """Agent that uses AIDE for code generation"""
-    def __init__(self, workspace: str = "experiment_workspace", model: str = None):
-        if model is None:
-            raise ValueError("Model parameter is required")
-            
-        self.workspace = Path(workspace).resolve()  # Get absolute path
-        self.workspace.mkdir(exist_ok=True)
-        self.model = model
-        
+    """Agent that uses AIDE to implement functions"""
+    def __init__(self, workspace: str = "experiment_workspace", model: str = None, task_name: str = None):
+        """Initialize agent with workspace path"""
         # Configure logging
-        logging.basicConfig(
-            level=logging.INFO,
-            format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-        )
         self.logger = logging.getLogger('AIDEAgent')
+        self.logger.setLevel(logging.DEBUG)
         
-        # Update config file with specified model
-        self._update_config_with_model()
+        # Convert workspace to absolute path if it's relative
+        self.workspace = str(Path(workspace).resolve())
+        self.model = model
+        self.task_name = task_name
         
-        # Create AIDE workspace structure
-        self.task_dir = self.workspace / "tasks"
-        self.task_dir.mkdir(exist_ok=True)
+        self.logger.info(f"Initializing AIDEAgent with workspace: {self.workspace}")
         
-        # Cache for successful solutions
-        self.solution_cache = {}
+        # Create workspace if it doesn't exist
+        os.makedirs(self.workspace, exist_ok=True)
         
-        # Set up environment variables for AIDE
-        os.environ['PYTHONPATH'] = str(Path(__file__).parent.parent)  # Set to project root
-        os.environ['OC_CAUSE'] = '1'  # Show full stack traces for config errors
-
-        # Configure based on model type
-        if 'llama' in model.lower():
-            self._setup_ollama()
-        elif 'gemini' in model.lower():
-            self._setup_gemini()
+        # Update config file with model if specified
+        if model:
+            self._update_config_with_model()
             
+            if "gemini" in model.lower():
+                self._setup_gemini()
+            elif "ollama" in model.lower():
+                self._setup_ollama()
+
+    def _clean_task_directory(self):
+        """Clean up task-specific workspace directory"""
+        # Ensure task workspace directory exists
+        os.makedirs(self.task_workspace, exist_ok=True)
+        self.logger.info(f"Created task workspace directory: {self.task_workspace}")
+        
+        # Clean up existing files in task directory
+        for item in os.listdir(self.task_workspace):
+            item_path = os.path.join(self.task_workspace, item)
+            try:
+                if os.path.isfile(item_path):
+                    os.unlink(item_path)
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
+                self.logger.debug(f"Cleaned up: {item_path}")
+            except Exception as e:
+                self.logger.warning(f"Error while cleaning up {item_path}: {e}")
+
     def _setup_ollama(self):
         """Setup Ollama configuration and check server"""
+        self.logger.info("Setting up Ollama configuration...")
         os.environ['OPENAI_BASE_URL'] = "http://localhost:11434/v1"
         os.environ['OPENAI_API_KEY'] = "local-llm"
         
@@ -388,7 +467,9 @@ class AIDEAgent:
             
     def _setup_gemini(self):
         """Setup Gemini configuration"""
+        self.logger.info("Setting up Gemini configuration...")
         if not os.getenv('GOOGLE_API_KEY'):
+            self.logger.error("GOOGLE_API_KEY environment variable not set")
             raise ValueError("Please set the GOOGLE_API_KEY environment variable")
             
         import google.generativeai as genai
@@ -403,42 +484,31 @@ class AIDEAgent:
             self.logger.error(f"Failed to initialize Gemini model: {str(e)}")
             raise
 
-    def _clean_directories(self):
-        """Clean up workspace directories"""
-        import shutil
-        # Clean up task directory contents but keep the directory
-        if self.task_dir.exists():
-            for item in self.task_dir.iterdir():
-                if item.is_file():
-                    item.unlink()
-                elif item.is_dir():
-                    shutil.rmtree(item)
-
     def _get_aide_params(self, time_budget: float) -> Dict[str, Any]:
         """Get AIDE parameters scaled based on time budget in minutes"""
-        # For very short time budgets, use minimal settings
+        # For very short time budgets, use minimal but aggressive settings
         if time_budget <= 1:
             params = {
                 "steps": 1,  # Single step
                 "k_fold_validation": 1,  # No cross validation
                 "max_debug_depth": 1,  # Minimal debug depth
-                "debug_prob": 0.1,  # Low debug probability
-                "num_drafts": 1,  # Single draft
-                "timeout": max(30, int(time_budget * 60))  # At least 30 seconds
+                "debug_prob": 0.5,  # Higher debug probability for short runs
+                "num_drafts": 2,  # Two drafts for better quality
+                "timeout": max(45, int(time_budget * 60))  # At least 45 seconds
             }
         else:
             # For longer runs, use exponential scaling
             scale = 1 - np.exp(-time_budget / 4)  # Smoother scaling curve
             
             # Calculate timeout with buffer
-            timeout = min(int(time_budget * 60 * 1.5), 900)  # Cap at 15 minutes, but give 50% buffer
+            timeout = min(int(time_budget * 60 * 1.2), 900)  # Cap at 15 minutes, 20% buffer
             
             params = {
-                "steps": max(1, int(8 * scale)),  # 1 to 8 steps
+                "steps": max(2, int(8 * scale)),  # 2 to 8 steps
                 "k_fold_validation": max(1, int(3 * scale)),  # 1 to 3 folds
-                "max_debug_depth": max(1, int(4 * scale)),  # 1 to 4 depth
-                "debug_prob": 0. + (0.5 * scale),  # 0. to 0.5 probability
-                "num_drafts": max(1, int(5 * scale)),  # 1 to 5 drafts
+                "max_debug_depth": max(2, int(4 * scale)),  # 2 to 4 depth
+                "debug_prob": 0.3 + (0.4 * scale),  # 0.3 to 0.7 probability
+                "num_drafts": max(2, int(5 * scale)),  # 2 to 5 drafts
                 "timeout": timeout
             }
             
@@ -446,28 +516,27 @@ class AIDEAgent:
         return params
 
     def implement_function(self, task: CodingTask) -> Tuple[str, Dict[str, float]]:
-        """Implement a coding task using AIDE
+        """Implement a coding task using AIDE"""
+        # Create task directory directly in the workspace
+        task_dir = os.path.join(self.workspace, task.function_name)
+        os.makedirs(task_dir, exist_ok=True)
         
-        Args:
-            task: The coding task to implement
-            
-        Returns:
-            Tuple of (code, timing_stats)
-        """
-        # Create task directory
-        task_dir = self.task_dir / task.function_name
-        task_dir.mkdir(exist_ok=True, parents=True)
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Created task directory: {task_dir}")
         
-        # Clean up any previous runs
-        for item in task_dir.iterdir():
-            if item.is_file():
-                item.unlink()
-            elif item.is_dir():
-                shutil.rmtree(item)
+        # Clean up any previous files in this directory
+        for item in os.listdir(task_dir):
+            item_path = os.path.join(task_dir, item)
+            if os.path.isfile(item_path):
+                os.unlink(item_path)
+            elif os.path.isdir(item_path):
+                shutil.rmtree(item_path)
+        
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Cleaned up previous run artifacts")
         
         # Construct task description
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Constructing task description")
         task_desc = f"""## Goal
-Implement a Python function named `{task.function_name}` that analyzes time series data.
+Implement a Python function named `{task.function_name}`.
 
 ## Background
 {task.function_description}
@@ -475,28 +544,35 @@ Implement a Python function named `{task.function_name}` that analyzes time seri
 ## Constraints
 {task.constraint}
 
-## Evaluation
-The implementation will be evaluated based on:
-1. Test case success rate (60%)
-2. Code style and readability (20%)
-3. Implementation efficiency (20%)
+## Test Cases
+The function will be tested with the following cases:
+{self._format_test_cases(task.test_cases)}
 
-The function should handle edge cases gracefully and include proper error handling.
+## Evaluation
+{task.evaluation}
 """
         
         # Write task description
-        with open(task_dir / "task.md", "w") as f:
+        task_md_path = os.path.join(task_dir, "task.md")
+        with open(task_md_path, "w") as f:
             f.write(task_desc)
             
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Wrote task description to {task_md_path}")
+            
         # Create input directory and copy data
-        input_dir = task_dir / "input"
-        input_dir.mkdir(exist_ok=True)
+        input_dir = os.path.join(task_dir, "input")
+        os.makedirs(input_dir, exist_ok=True)
         
         # Create a dummy input file to satisfy AIDE's requirements
-        (input_dir / "input.txt").write_text("Function implementation task")
+        input_file = os.path.join(input_dir, "input.txt")
+        with open(input_file, "w") as f:
+            f.write("Function implementation task")
             
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Created input directory and files")
+        
         # Set parameters based on time budget
-        params = self._get_aide_params(task.time_budget)  # Use the correct method name
+        params = self._get_aide_params(task.time_budget)
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Using AIDE parameters: {params}")
         
         # Run AIDE
         start_time = time.time()
@@ -504,26 +580,30 @@ The function should handle edge cases gracefully and include proper error handli
         
         try:
             # Store original directory
-            original_dir = Path.cwd()
+            original_dir = os.getcwd()
+            self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Original working directory: {original_dir}")
             
             # Change to task directory
             os.chdir(task_dir)
+            self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Changed working directory to: {task_dir}")
             
             setup_time = time.time() - setup_start
             aide_start = time.time()
             
             # Run AIDE command
             try:
-                # Base command list
-                cmd = [
-                    "aide",
-                    f"data_dir=input",  # Relative to task directory
-                    f"desc_file=task.md",  # Just the filename
-                    f"log_dir=logs",  # Relative to task directory
-                    f"workspace_dir=workspaces",  # Relative to task directory
+                # Construct command
+                cmd = ["aide"]
+                
+                # Add parameters
+                cmd.extend([
+                    f"data_dir={os.path.join(task_dir, 'input')}",
+                    f"desc_file={os.path.join(task_dir, 'task.md')}",
+                    f"log_dir={os.path.join(task_dir, 'logs')}",
+                    f"workspace_dir={os.path.join(task_dir, 'workspaces')}",
                     f"exp_name={task.function_name}_exp",
                     f"exec.timeout={params['timeout']}",
-                    "exec.agent_file_name=solution.py",
+                    f"exec.agent_file_name=solution.py",
                     f"agent.steps={params['steps']}",
                     f"agent.k_fold_validation={params['k_fold_validation']}",
                     "agent.expose_prediction=true",
@@ -537,198 +617,140 @@ The function should handle edge cases gracefully and include proper error handli
                     "preprocess_data=true",
                     "copy_data=true",
                     "generate_report=true"
-                ]
-
-                # Add model-specific parameters - just use the model name without constructor
-                cmd.extend([
-                    f"agent.code.model={self.model}",
-                    f"agent.feedback.model={self.model}",
-                    f"report.model={self.model}"
                 ])
-
-                self.logger.info(f"Running command: {' '.join(cmd)}")
-                self.logger.info(f"Working directory: {os.getcwd()}")
                 
-                # Run AIDE process with real-time output monitoring
+                # Add model parameters if specified
+                if self.model:
+                    cmd.extend([
+                        f"agent.code.model={self.model}",
+                        f"agent.feedback.model={self.model}",
+                        f"report.model={self.model}"
+                    ])
+                
+                cmd_str = " ".join(cmd)
+                self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Running command: {cmd_str}")
+                
+                # Create process
                 process = subprocess.Popen(
-                    cmd,
+                    cmd_str,
+                    shell=True,
                     stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
                     universal_newlines=True,
-                    bufsize=1,  # Line buffered
-                    env={
-                        **os.environ,
-                        'PYTHONUNBUFFERED': '1',  # Force unbuffered output
-                        'AIDE_DEBUG': '1'  # Enable debug logging
-                    }
+                    bufsize=1
                 )
-
-                # Monitor process output in real-time
-                import select
-                import fcntl
-                import errno
-
-                # Set non-blocking mode for pipes
-                for pipe in [process.stdout, process.stderr]:
-                    flags = fcntl.fcntl(pipe.fileno(), fcntl.F_GETFL)
-                    fcntl.fcntl(pipe.fileno(), fcntl.F_SETFL, flags | os.O_NONBLOCK)
-
-                poller = select.poll()
-                poller.register(process.stdout, select.POLLIN | select.POLLHUP)
-                poller.register(process.stderr, select.POLLIN | select.POLLHUP)
-
-                # Track when we last saw output
-                last_output_time = time.time()
-                timeout = params['timeout']
-                start_time = time.time()
-                self.logger.info(f"Starting AIDE process with {timeout}s timeout")
-
-                # Track if we've seen initial output
-                seen_initial_output = False
-                stall_threshold = timeout
-
-                while True:
-                    current_time = time.time()
-                    elapsed = current_time - start_time
-                    
-                    # Check if process has finished
-                    poll_result = process.poll()
-                    if poll_result is not None:
-                        self.logger.info(f"AIDE process completed with return code {poll_result} after {elapsed:.1f}s")
-                        break
-                        
-                    # Check for timeout
-                    if current_time - start_time > timeout:
-                        self.logger.error(f"AIDE process exceeded timeout of {timeout}s")
-                        self.logger.info("Sending SIGTERM to process tree")
-                        self._kill_process_tree(process)
-                        break
-                        
-                    # Check for stall
-                    time_since_output = current_time - last_output_time
-                    if time_since_output > 10:
-                        if not seen_initial_output:
-                            self.logger.warning(f"No initial output from AIDE process after {elapsed:.1f}s")
-                        else:
-                            self.logger.warning(f"No output from AIDE process for {time_since_output:.1f}s (elapsed: {elapsed:.1f}s)")
-                            
-                        if time_since_output > stall_threshold:
-                            self.logger.error(f"Process appears to be stalled after {elapsed:.1f}s, killing process tree")
-                            self._kill_process_tree(process)
-                            break
-                            
-                    # Poll for new output (wait up to 5 seconds)
-                    events = poller.poll(5000)
-                    for fd, event in events:
-                        # Handle process termination
-                        if event & select.POLLHUP:
-                            self.logger.info("AIDE process pipe closed")
-                            continue
-                            
-                        # Read from appropriate pipe
-                        if fd == process.stdout.fileno():
-                            try:
-                                line = process.stdout.readline()
-                                if line:
-                                    self.logger.info(f"AIDE: {line.strip()}")
-                                    last_output_time = current_time
-                                    seen_initial_output = True
-                            except IOError as e:
-                                if e.errno != errno.EAGAIN:
-                                    self.logger.error(f"Error reading stdout: {e}")
-                                    raise
-                        elif fd == process.stderr.fileno():
-                            try:
-                                line = process.stderr.readline()
-                                if line:
-                                    self.logger.error(f"AIDE error: {line.strip()}")
-                                    last_output_time = current_time
-                                    seen_initial_output = True
-                            except IOError as e:
-                                if e.errno != errno.EAGAIN:
-                                    self.logger.error(f"Error reading stderr: {e}")
-                                    raise
-
-                # Get any remaining output
-                try:
-                    stdout, stderr = process.communicate(timeout=5)  # Increased timeout for final output
-                    if stdout:
-                        self.logger.info(f"Final AIDE output: {stdout.strip()}")
-                    if stderr:
-                        self.logger.error(f"Final AIDE errors: {stderr.strip()}")
-                except subprocess.TimeoutExpired:
-                    self.logger.error("Timed out waiting for final output")
-                    process.kill()
-                    stdout, stderr = process.communicate()
                 
-                if process.returncode != 0:
-                    self.logger.error(f"AIDE process failed with return code: {process.returncode}")
-                    # Try to get the solution file from either logs or workspaces
-                    solution_file = Path("logs") / f"0-{task.function_name}_exp" / "best_solution.py"
-                    if not solution_file.exists():
-                        self.logger.info("Best solution not found in logs, checking workspaces...")
-                        solution_file = Path("workspaces") / f"0-{task.function_name}_exp" / "solution.py"
-                    
-                    if solution_file.exists():
-                        with open(solution_file) as f:
-                            code = f.read()
-                            self.logger.info(f"Found solution at: {solution_file}")
-                    else:
-                        self.logger.error("Solution file not found in logs or workspaces")
-                        code = ""
-                    return code, {
+                self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Started AIDE process with PID: {process.pid}")
+                
+                # Track time since last output
+                last_output_time = time.time()
+                start_time = time.time()
+                
+                # Read output
+                while True:
+                    # Check if process has finished
+                    if process.poll() is not None:
+                        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] AIDE process completed with return code: {process.returncode}")
+                        break
+                        
+                    # Read output with timeout
+                    try:
+                        line = process.stdout.readline()
+                        if line:
+                            self.logger.info(f"AIDE: {line.strip()}")
+                            last_output_time = time.time()
+                        else:
+                            # No output available, sleep briefly
+                            time.sleep(0.1)
+                            
+                            # Check for timeout
+                            elapsed = time.time() - start_time
+                            quiet_time = time.time() - last_output_time
+                            
+                            if elapsed >= params['timeout']:
+                                self.logger.error(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] AIDE process exceeded timeout of {params['timeout']}s")
+                                # Send SIGTERM first
+                                process.terminate()
+                                time.sleep(1)
+                                if process.poll() is None:
+                                    # If still running, force kill
+                                    self.logger.warning(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Process did not terminate gracefully, forcing kill")
+                                    process.kill()
+                                break
+                            elif quiet_time >= 10:
+                                self.logger.warning(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No output from AIDE process for {quiet_time:.1f}s (elapsed: {elapsed:.1f}s)")
+                                # Check process state
+                                try:
+                                    os.kill(process.pid, 0)
+                                    self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Process is still running")
+                                except OSError:
+                                    self.logger.error(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Process appears to be dead")
+                                    break
+                    except Exception as e:
+                        self.logger.error(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Error reading AIDE output: {str(e)}")
+                        break
+                
+                # Clean up process
+                if process.poll() is None:
+                    self.logger.warning(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Cleaning up AIDE process")
+                    process.terminate()
+                    try:
+                        process.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        process.kill()
+                
+                # Look for solution file
+                solution_paths = [
+                    os.path.join(task_dir, "logs", "0-" + task.function_name + "_exp", "best_solution.py"),
+                    os.path.join(task_dir, "workspaces", "0-" + task.function_name + "_exp", "solution.py")
+                ]
+                
+                solution_code = None
+                for path in solution_paths:
+                    if os.path.exists(path):
+                        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Found solution at: {path}")
+                        with open(path, 'r') as f:
+                            solution_code = f.read()
+                        break
+                
+                if not solution_code:
+                    self.logger.error(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] No solution file found")
+                    return "# Error: No solution generated", {
                         'total_time': time.time() - start_time,
                         'aide_execution_time': time.time() - aide_start,
                         'setup_time': setup_time,
-                        'cleanup_time': 0.0
+                        'cleanup_time': 0
                     }
-                    
-                # Get solution code
-                solution_file = Path("logs") / f"0-{task.function_name}_exp" / "best_solution.py"
-                if not solution_file.exists():
-                    self.logger.info("Best solution not found in logs, checking workspaces...")
-                    solution_file = Path("workspaces") / f"0-{task.function_name}_exp" / "solution.py"
                 
-                if solution_file.exists():
-                    with open(solution_file) as f:
-                        code = f.read()
-                        self.logger.info(f"Found solution at: {solution_file}")
-                else:
-                    self.logger.error("Solution file not found in logs or workspaces")
-                    code = ""
-                    
-            except subprocess.TimeoutExpired:
-                self.logger.error("AIDE process timed out")
-                process.kill()
-                return "", {
+                return solution_code, {
                     'total_time': time.time() - start_time,
                     'aide_execution_time': time.time() - aide_start,
                     'setup_time': setup_time,
-                    'cleanup_time': 0.0
+                    'cleanup_time': 0
                 }
                 
-            aide_time = time.time() - aide_start
-            cleanup_start = time.time()
-            
-            # Clean up
-            cleanup_time = time.time() - cleanup_start
-            
-            return code, {
-                'total_time': time.time() - start_time,
-                'aide_execution_time': aide_time,
-                'setup_time': setup_time,
-                'cleanup_time': cleanup_time
-            }
+            except Exception as e:
+                self.logger.error(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Error running AIDE: {str(e)}")
+                return f"# Error: {str(e)}", {
+                    'total_time': time.time() - start_time,
+                    'aide_execution_time': time.time() - aide_start,
+                    'setup_time': setup_time,
+                    'cleanup_time': 0
+                }
             
         finally:
-            # Always try to restore original directory
-            os.chdir(original_dir)
+            # Always restore original directory
+            try:
+                os.chdir(original_dir)
+                self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Restored working directory to: {original_dir}")
+            except Exception as e:
+                self.logger.error(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Error restoring working directory: {str(e)}")
 
     def _update_config_with_model(self):
         """Update the AIDE config file with the specified model"""
         try:
             # Find the config file
-            config_path = Path(__file__).parent.parent / "aideml" / "aide" / "utils" / "config.yaml"
+            config_path = Path(__file__).parent.parent.parent / "aideml" / "aide" / "utils" / "config.yaml"
             if not config_path.exists():
                 self.logger.warning(f"Config file not found at {config_path}")
                 return
@@ -794,6 +816,22 @@ The function should handle edge cases gracefully and include proper error handli
             except:
                 process.kill()
                 
+    def _format_test_cases(self, test_cases: List[Dict[str, Any]]) -> str:
+        """Format test cases for the task description"""
+        formatted = []
+        for i, test in enumerate(test_cases, 1):
+            inputs = test['input']
+            expected = test['expected']
+            
+            # Format expected output
+            if isinstance(expected, Exception):
+                expected_str = "Should raise an exception"
+            else:
+                expected_str = str(expected)
+            
+            formatted.append(f"{i}. Input: {inputs}")
+            formatted.append(f"   Expected: {expected_str}\n")
+
 class Evaluator:
     """Evaluates coding task results"""
     def __init__(self):
@@ -810,17 +848,8 @@ class Evaluator:
     def evaluate_task(self, task: CodingTask, code: str, time_taken: float,
                     aide_time: float, setup_time: float, cleanup_time: float) -> TaskResult:
         """Evaluate a coding task implementation"""
-        # Find the correct solution file based on time budget
-        log_dir = Path("experiment_workspace/tasks") / task.function_name / "logs"
-        if log_dir.exists():
-            # Find latest experiment directory
-            exp_dirs = list(log_dir.glob("*"))
-            if exp_dirs:
-                latest_exp_dir = max(exp_dirs, key=lambda p: p.stat().st_mtime)
-                solution_file = latest_exp_dir / f"solution_{task.time_budget}m.py"
-                if solution_file.exists():
-                    code = solution_file.read_text()
-                    self.logger.info(f"Using solution from: {solution_file}")
+        # Get detailed scores first
+        scores = self.quality_scorer.get_detailed_scores(code, task.test_cases)
         
         # Check constraint violations
         violations = self.constraint_checker.check_violations(code)
@@ -846,9 +875,6 @@ class Evaluator:
             delegation_depth = 2 + int(complexity_score)
             delegation_depth = min(delegation_depth, 4)  # Cap at 4
         
-        # Score implementation
-        performance_score = self.quality_scorer.score_code(code, task.test_cases)
-        
         return TaskResult(
             code=code,
             time_taken=time_taken,
@@ -857,171 +883,67 @@ class Evaluator:
             cleanup_time=cleanup_time,
             delegation_depth=delegation_depth,
             constraint_violations=violations,
-            performance_score=performance_score
+            performance_score=scores.get('test_passing', 0.0)  # Use test passing score as performance score
         )
 
-    def analyze_results(self, results: Dict[float, List[TaskResult]]) -> Dict[str, Any]:
-        """Analyze experiment results
-        
-        Args:
-            results: Dictionary mapping time budgets to lists of task results
-            
-        Returns:
-            Dictionary containing analysis metrics
-        """
-        analysis = {
-            'time_budgets': [],
-            'performance_scores': {'mean': [], 'std': []},
-            'total_times': {'mean': [], 'std': []},
-            'aide_times': {'mean': [], 'std': []},
-            'delegation_depths': {'mean': [], 'std': []},
-            'violation_counts': {'mean': [], 'std': []},
-            'implementations': [],
-            'summary': {}
-        }
-        
-        # Extract metrics for each time budget
-        for budget, budget_results in sorted(results.items()):
-            # Skip empty results
-            if not budget_results:
-                continue
-                
-            analysis['time_budgets'].append(budget)
-            
-            # Calculate metrics for this budget
-            perf_scores = [r.performance_score for r in budget_results]
-            total_times = [r.time_taken for r in budget_results]
-            aide_times = [r.aide_execution_time for r in budget_results]
-            depths = [r.delegation_depth for r in budget_results]
-            violations = [len(r.constraint_violations) for r in budget_results]
-            
-            # Store means and standard deviations
-            analysis['performance_scores']['mean'].append(float(np.mean(perf_scores)))
-            analysis['performance_scores']['std'].append(float(np.std(perf_scores)))
-            analysis['total_times']['mean'].append(float(np.mean(total_times)))
-            analysis['total_times']['std'].append(float(np.std(total_times)))
-            analysis['aide_times']['mean'].append(float(np.mean(aide_times)))
-            analysis['aide_times']['std'].append(float(np.std(aide_times)))
-            analysis['delegation_depths']['mean'].append(float(np.mean(depths)))
-            analysis['delegation_depths']['std'].append(float(np.std(depths)))
-            analysis['violation_counts']['mean'].append(float(np.mean(violations)))
-            analysis['violation_counts']['std'].append(float(np.std(violations)))
-            
-            # Store best implementation for this budget
-            best_idx = np.argmax(perf_scores)
-            analysis['implementations'].append(budget_results[best_idx].code)
-            
-        # Calculate summary statistics
-        with np.errstate(divide='ignore', invalid='ignore'):
-            analysis['summary'] = {
-                'performance_score': {
-                    'mean': float(np.mean([s for s in analysis['performance_scores']['mean'] if s is not None])),
-                    'std': float(np.std([s for s in analysis['performance_scores']['mean'] if s is not None]))
-                },
-                'total_time': {
-                    'mean': float(np.mean([t for t in analysis['total_times']['mean'] if t is not None])),
-                    'std': float(np.std([t for t in analysis['total_times']['mean'] if t is not None]))
-                },
-                'aide_time': {
-                    'mean': float(np.mean([t for t in analysis['aide_times']['mean'] if t is not None])),
-                    'std': float(np.std([t for t in analysis['aide_times']['mean'] if t is not None]))
-                },
-                'time_efficiency': {
-                    'mean': float(np.mean([t/b for t, b in zip(analysis['total_times']['mean'], analysis['time_budgets']) if t is not None])),
-                    'std': float(np.std([t/b for t, b in zip(analysis['total_times']['mean'], analysis['time_budgets']) if t is not None]))
-                },
-                'success_rate': float(np.mean([s > 0.8 for s in analysis['performance_scores']['mean'] if s is not None]))
-            }
-            
-            # Calculate correlations
-            analysis['correlations'] = {
-                'actual_vs_budget': self.safe_correlation(
-                    np.array(analysis['time_budgets']), 
-                    np.array([t for t in analysis['total_times']['mean'] if t is not None])
-                ),
-                'depth_vs_violations': self.safe_correlation(
-                    np.array([d for d in analysis['delegation_depths']['mean'] if d is not None]),
-                    np.array([v for v in analysis['violation_counts']['mean'] if v is not None])
-                )
-            }
-            
-        return analysis
-
-    def print_analysis(self, analysis: Dict[str, Any]) -> None:
-        """Print analysis results in a readable format"""
-        self.logger.info("\nAnalysis Results:")
-        self.logger.info("=================\n")
-        self.logger.info("Detailed Results by Time Budget:\n")
-        
-        for i, time_budget in enumerate(analysis['time_budgets']):
-            self.logger.info(f"Time Budget: {time_budget} minutes")
-            self.logger.info(f"Performance Score: {analysis['performance_scores']['mean'][i]:.2f} ± {analysis['performance_scores']['std'][i]:.2f}")
-            self.logger.info(f"Total Time: {analysis['total_times']['mean'][i]:.1f}s ± {analysis['total_times']['std'][i]:.1f}s")
-            self.logger.info(f"AIDE Time: {analysis['aide_times']['mean'][i]:.1f}s ± {analysis['aide_times']['std'][i]:.1f}s")
-            self.logger.info(f"Delegation Depth: {analysis['delegation_depths']['mean'][i]:.1f} ± {analysis['delegation_depths']['std'][i]:.1f}")
-            self.logger.info(f"Constraint Violations: {analysis['violation_counts']['mean'][i]:.1f} ± {analysis['violation_counts']['std'][i]:.1f}")
-            
-            # Print best implementation for this time budget
-            if analysis['implementations'][i]:
-                self.logger.info("\nBest Implementation:")
-                self.logger.info("-------------------")
-                self.logger.info(analysis['implementations'][i])
-            self.logger.info("\n")
-
-        self.logger.info("Summary Statistics:")
-        self.logger.info(f"Mean Performance Score: {analysis['summary']['performance_score']['mean']:.2f} ± {analysis['summary']['performance_score']['std']:.2f}")
-        self.logger.info(f"Mean Total Time: {analysis['summary']['total_time']['mean']:.1f}s ± {analysis['summary']['total_time']['std']:.1f}s")
-        self.logger.info(f"Mean AIDE Time: {analysis['summary']['aide_time']['mean']:.1f}s ± {analysis['summary']['aide_time']['std']:.1f}s")
-        self.logger.info(f"Mean Time Efficiency: {analysis['summary']['time_efficiency']['mean']:.2f} ± {analysis['summary']['time_efficiency']['std']:.2f}")
-        self.logger.info(f"Success Rate: {analysis['summary']['success_rate']*100:.1f}%\n")
-        
-        self.logger.info("Correlations:")
-        self.logger.info(f"Time Budget vs Actual Time: {analysis['correlations']['actual_vs_budget']:.2f}")
-        self.logger.info(f"Delegation Depth vs Violations: {analysis['correlations']['depth_vs_violations']:.2f}\n")
-
 class ExperimentRunner:
-    """Runs coding task experiments"""
-    def __init__(self, workspace: str = "experiment_workspace", model: str = "gpt-4-turbo-preview"):
-        # Configure logging with a more specific format and file output
-        log_format = '%(asctime)s - %(levelname)-8s %(message)s'
-        date_format = '%Y-%m-%d %H:%M:%S'
-        
-        # Create a file handler for errors
-        error_handler = logging.FileHandler('framework_errors.log')
-        error_handler.setLevel(logging.ERROR)
-        error_handler.setFormatter(logging.Formatter(log_format, date_format))
-        
-        # Create a console handler for info and above
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.DEBUG)
-        console_handler.setFormatter(logging.Formatter(log_format, date_format))
-        
-        # Configure root logger
-        root_logger = logging.getLogger()
-        root_logger.setLevel(logging.DEBUG)
-        
-        # Remove any existing handlers
-        for handler in root_logger.handlers[:]:
-            root_logger.removeHandler(handler)
-            
-        # Add our handlers
-        root_logger.addHandler(error_handler)
-        root_logger.addHandler(console_handler)
-        
-        # Create our specific logger
-        self.logger = logging.getLogger('ExperimentRunner')
-        self.agent = AIDEAgent(workspace=workspace, model=model)
-        self.evaluator = Evaluator()
-
+    """Runs experiments with multiple tasks and time budgets"""
+    def __init__(self, workspace: str = "experiment_workspace", model: str = None):
+        """Initialize runner with workspace path"""
+        self.workspace = workspace
         self.model = model
+        self.logger = logging.getLogger('ExperimentRunner')
+        self.evaluator = Evaluator()
         
-        # Suppress specific error messages
-        logging.getLogger('tensorflow').setLevel(logging.ERROR)
-        logging.getLogger('absl').setLevel(logging.ERROR)
+        # Create timestamped results file
+        timestamp = time.strftime('%Y%m%d_%H%M%S')
+        self.results_file = os.path.join(workspace, f"experiment_results_{timestamp}.csv")
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Results will be saved to: {self.results_file}")
         
-        # Add environment variables to suppress GRPC warnings
-        os.environ['GRPC_VERBOSITY'] = 'ERROR'
-        os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
+        # Write CSV header
+        with open(self.results_file, 'w') as f:
+            f.write("timestamp,task_name,time_budget,run_number,total_time,aide_time,setup_time,cleanup_time,"
+                   "test_passing_score,code_style_score,efficiency_score,final_score,"
+                   "delegation_depth,num_violations,violations\n")
+
+    def _save_run_results(self, task: CodingTask, run_num: int, timing_stats: Dict[str, float], 
+                         result: TaskResult):
+        """Save individual run results to CSV file"""
+        timestamp = time.strftime('%Y-%m-%d %H:%M:%S')
+        
+        # Get detailed scores from quality scorer
+        scores = self.evaluator.quality_scorer.get_detailed_scores(result.code, task.test_cases)
+        
+        # Format violations as a semicolon-separated string, ensuring it's properly quoted
+        violations_str = ''
+        if result.constraint_violations:
+            violations_str = ';'.join(str(v) for v in result.constraint_violations)
+        violations_str = f'"{violations_str}"' if violations_str else '""'
+        
+        # Prepare row data
+        row = [
+            timestamp,
+            task.function_name,
+            task.time_budget,
+            run_num,
+            timing_stats['total_time'],
+            timing_stats['aide_execution_time'],
+            timing_stats['setup_time'],
+            timing_stats['cleanup_time'],
+            scores.get('test_passing', 0.0),
+            scores.get('code_style', 0.0),
+            scores.get('efficiency', 0.0),
+            result.performance_score,
+            result.delegation_depth,
+            len(result.constraint_violations),
+            violations_str  # Now properly formatted
+        ]
+        
+        # Write to CSV
+        with open(self.results_file, 'a') as f:
+            f.write(','.join(map(str, row)) + '\n')
+        
+        self.logger.info(f"[{timestamp}] Saved results for {task.function_name} run {run_num}")
 
     def safe_correlation(self, x: np.ndarray, y: np.ndarray) -> float:
         """Calculate correlation with proper handling of edge cases"""
@@ -1039,133 +961,171 @@ class ExperimentRunner:
         self.logger.info("=================\n")
         self.logger.info("Detailed Results by Time Budget:\n")
         
-        for i, time_budget in enumerate(analysis['time_budgets']):
+        # Print per-time-budget statistics
+        for time_budget, stats in analysis['by_time_budget'].items():
             self.logger.info(f"Time Budget: {time_budget} minutes")
-            self.logger.info(f"Performance Score: {analysis['performance_scores']['mean'][i]:.2f} ± {analysis['performance_scores']['std'][i]:.2f}")
-            self.logger.info(f"Total Time: {analysis['total_times']['mean'][i]:.1f}s ± {analysis['total_times']['std'][i]:.1f}s")
-            self.logger.info(f"AIDE Time: {analysis['aide_times']['mean'][i]:.1f}s ± {analysis['aide_times']['std'][i]:.1f}s")
-            self.logger.info(f"Delegation Depth: {analysis['delegation_depths']['mean'][i]:.1f} ± {analysis['delegation_depths']['std'][i]:.1f}")
-            self.logger.info(f"Constraint Violations: {analysis['violation_counts']['mean'][i]:.1f} ± {analysis['violation_counts']['std'][i]:.1f}")
-            
-            # Print best implementation for this time budget
-            if analysis['implementations'][i]:
-                self.logger.info("\nBest Implementation:")
-                self.logger.info("-------------------")
-                self.logger.info(analysis['implementations'][i])
-            self.logger.info("\n")
+            self.logger.info(f"Performance Score: {stats['performance_score']['mean']:.2f} ± {stats['performance_score']['std']:.2f}")
+            self.logger.info(f"Total Time: {stats['total_time']['mean']:.1f}s ± {stats['total_time']['std']:.1f}s")
+            self.logger.info(f"AIDE Time: {stats['aide_time']['mean']:.1f}s ± {stats['aide_time']['std']:.1f}s")
+            self.logger.info(f"Delegation Depth: {stats['delegation_depth']['mean']:.1f} ± {stats['delegation_depth']['std']:.1f}")
+            self.logger.info(f"Constraint Violations: {stats['violations']['mean']:.1f} ± {stats['violations']['std']:.1f}")
+            self.logger.info(f"Number of Runs: {stats['num_runs']}\n")
 
-        self.logger.info("Summary Statistics:")
-        self.logger.info(f"Mean Performance Score: {analysis['summary']['performance_score']['mean']:.2f} ± {analysis['summary']['performance_score']['std']:.2f}")
-        self.logger.info(f"Mean Total Time: {analysis['summary']['total_time']['mean']:.1f}s ± {analysis['summary']['total_time']['std']:.1f}s")
-        self.logger.info(f"Mean AIDE Time: {analysis['summary']['aide_time']['mean']:.1f}s ± {analysis['summary']['aide_time']['std']:.1f}s")
-        self.logger.info(f"Mean Time Efficiency: {analysis['summary']['time_efficiency']['mean']:.2f} ± {analysis['summary']['time_efficiency']['std']:.2f}")
-        self.logger.info(f"Success Rate: {analysis['summary']['success_rate']*100:.1f}%\n")
+        # Print overall statistics
+        self.logger.info("Overall Statistics:")
+        self.logger.info(f"Total Runs: {analysis['overall']['total_runs']}")
+        self.logger.info(f"Mean Performance Score: {analysis['overall']['performance_score']['mean']:.2f} ± {analysis['overall']['performance_score']['std']:.2f}")
+        self.logger.info(f"Mean Total Time: {analysis['overall']['total_time']['mean']:.1f}s ± {analysis['overall']['total_time']['std']:.1f}s")
+        self.logger.info(f"Mean AIDE Time: {analysis['overall']['aide_time']['mean']:.1f}s ± {analysis['overall']['aide_time']['std']:.1f}s")
+        self.logger.info(f"Mean Delegation Depth: {analysis['overall']['delegation_depth']['mean']:.2f} ± {analysis['overall']['delegation_depth']['std']:.2f}")
+        self.logger.info(f"Mean Violations: {analysis['overall']['violations']['mean']:.2f} ± {analysis['overall']['violations']['std']:.2f}\n")
         
+        # Print correlations
         self.logger.info("Correlations:")
-        self.logger.info(f"Time Budget vs Actual Time: {analysis['correlations']['actual_vs_budget']:.2f}")
-        self.logger.info(f"Delegation Depth vs Violations: {analysis['correlations']['depth_vs_violations']:.2f}\n")
+        for metric, value in analysis['correlations'].items():
+            self.logger.info(f"  {metric}: {value:.3f}")
+        self.logger.info("")
 
     def analyze_results(self, results: Dict[float, List[TaskResult]]) -> Dict[str, Any]:
-        """Analyze experiment results
+        """Analyze experiment results and generate statistics
         
         Args:
-            results: Dictionary mapping time budgets to lists of task results
+            results: Dictionary mapping time budgets to lists of TaskResults
             
         Returns:
-            Dictionary containing analysis metrics
+            Dictionary containing analysis results and statistics
         """
+        self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Analyzing experiment results")
+        
         analysis = {
-            'time_budgets': [],
-            'performance_scores': {'mean': [], 'std': []},
-            'total_times': {'mean': [], 'std': []},
-            'aide_times': {'mean': [], 'std': []},
-            'delegation_depths': {'mean': [], 'std': []},
-            'violation_counts': {'mean': [], 'std': []},
-            'implementations': [],
-            'summary': {}
+            'by_time_budget': {},
+            'overall': {},
+            'correlations': {}
         }
         
-        # Extract metrics for each time budget
-        for budget, budget_results in sorted(results.items()):
-            # Skip empty results
-            if not budget_results:
-                continue
-                
-            analysis['time_budgets'].append(budget)
-            
-            # Calculate metrics for this budget
+        # Collect all metrics across all time budgets
+        all_perf_scores = []
+        all_total_times = []
+        all_aide_times = []
+        all_depths = []
+        all_violations = []
+        all_time_budgets = []
+        
+        for time_budget, budget_results in results.items():
+            # Extract metrics for this time budget
             perf_scores = [r.performance_score for r in budget_results]
             total_times = [r.time_taken for r in budget_results]
             aide_times = [r.aide_execution_time for r in budget_results]
             depths = [r.delegation_depth for r in budget_results]
             violations = [len(r.constraint_violations) for r in budget_results]
             
-            # Store means and standard deviations
-            analysis['performance_scores']['mean'].append(float(np.mean(perf_scores)))
-            analysis['performance_scores']['std'].append(float(np.std(perf_scores)))
-            analysis['total_times']['mean'].append(float(np.mean(total_times)))
-            analysis['total_times']['std'].append(float(np.std(total_times)))
-            analysis['aide_times']['mean'].append(float(np.mean(aide_times)))
-            analysis['aide_times']['std'].append(float(np.std(aide_times)))
-            analysis['delegation_depths']['mean'].append(float(np.mean(depths)))
-            analysis['delegation_depths']['std'].append(float(np.std(depths)))
-            analysis['violation_counts']['mean'].append(float(np.mean(violations)))
-            analysis['violation_counts']['std'].append(float(np.std(violations)))
+            # Store metrics for correlation analysis
+            all_perf_scores.extend(perf_scores)
+            all_total_times.extend(total_times)
+            all_aide_times.extend(aide_times)
+            all_depths.extend(depths)
+            all_violations.extend(violations)
+            all_time_budgets.extend([time_budget] * len(budget_results))
             
-            # Store best implementation for this budget
-            best_idx = np.argmax(perf_scores)
-            analysis['implementations'].append(budget_results[best_idx].code)
-            
-        # Calculate summary statistics
-        with np.errstate(divide='ignore', invalid='ignore'):
-            analysis['summary'] = {
+            # Calculate statistics for this time budget
+            budget_stats = {
                 'performance_score': {
-                    'mean': float(np.mean([s for s in analysis['performance_scores']['mean'] if s is not None])),
-                    'std': float(np.std([s for s in analysis['performance_scores']['mean'] if s is not None]))
+                    'mean': float(np.mean(perf_scores)),
+                    'std': float(np.std(perf_scores)),
+                    'min': float(np.min(perf_scores)),
+                    'max': float(np.max(perf_scores))
                 },
                 'total_time': {
-                    'mean': float(np.mean([t for t in analysis['total_times']['mean'] if t is not None])),
-                    'std': float(np.std([t for t in analysis['total_times']['mean'] if t is not None]))
+                    'mean': float(np.mean(total_times)),
+                    'std': float(np.std(total_times)),
+                    'min': float(np.min(total_times)),
+                    'max': float(np.max(total_times))
                 },
                 'aide_time': {
-                    'mean': float(np.mean([t for t in analysis['aide_times']['mean'] if t is not None])),
-                    'std': float(np.std([t for t in analysis['aide_times']['mean'] if t is not None]))
+                    'mean': float(np.mean(aide_times)),
+                    'std': float(np.std(aide_times)),
+                    'min': float(np.min(aide_times)),
+                    'max': float(np.max(aide_times))
                 },
-                'time_efficiency': {
-                    'mean': float(np.mean([t/b for t, b in zip(analysis['total_times']['mean'], analysis['time_budgets']) if t is not None])),
-                    'std': float(np.std([t/b for t, b in zip(analysis['total_times']['mean'], analysis['time_budgets']) if t is not None]))
+                'delegation_depth': {
+                    'mean': float(np.mean(depths)),
+                    'std': float(np.std(depths)),
+                    'min': float(np.min(depths)),
+                    'max': float(np.max(depths))
                 },
-                'success_rate': float(np.mean([s > 0.8 for s in analysis['performance_scores']['mean'] if s is not None]))
+                'violations': {
+                    'mean': float(np.mean(violations)),
+                    'std': float(np.std(violations)),
+                    'min': float(np.min(violations)),
+                    'max': float(np.max(violations))
+                },
+                'num_runs': len(budget_results)
             }
             
-            # Calculate correlations
-            analysis['correlations'] = {
-                'actual_vs_budget': self.safe_correlation(
-                    np.array(analysis['time_budgets']), 
-                    np.array([t for t in analysis['total_times']['mean'] if t is not None])
-                ),
-                'depth_vs_violations': self.safe_correlation(
-                    np.array([d for d in analysis['delegation_depths']['mean'] if d is not None]),
-                    np.array([v for v in analysis['violation_counts']['mean'] if v is not None])
-                )
-            }
+            analysis['by_time_budget'][time_budget] = budget_stats
+            
+            # Log statistics for this time budget
+            self.logger.info(f"\nTime Budget {time_budget}m Statistics:")
+            self.logger.info(f"  Performance Score: {budget_stats['performance_score']['mean']:.2f} ± {budget_stats['performance_score']['std']:.2f}")
+            self.logger.info(f"  Total Time: {budget_stats['total_time']['mean']:.1f}s ± {budget_stats['total_time']['std']:.1f}s")
+            self.logger.info(f"  AIDE Time: {budget_stats['aide_time']['mean']:.1f}s ± {budget_stats['aide_time']['std']:.1f}s")
+            self.logger.info(f"  Delegation Depth: {budget_stats['delegation_depth']['mean']:.1f} ± {budget_stats['delegation_depth']['std']:.1f}")
+            self.logger.info(f"  Violations: {budget_stats['violations']['mean']:.1f} ± {budget_stats['violations']['std']:.1f}")
+        
+        # Calculate overall statistics
+        analysis['overall'] = {
+            'performance_score': {
+                'mean': float(np.mean(all_perf_scores)),
+                'std': float(np.std(all_perf_scores))
+            },
+            'total_time': {
+                'mean': float(np.mean(all_total_times)),
+                'std': float(np.std(all_total_times))
+            },
+            'aide_time': {
+                'mean': float(np.mean(all_aide_times)),
+                'std': float(np.std(all_aide_times))
+            },
+            'delegation_depth': {
+                'mean': float(np.mean(all_depths)),
+                'std': float(np.std(all_depths))
+            },
+            'violations': {
+                'mean': float(np.mean(all_violations)),
+                'std': float(np.std(all_violations))
+            },
+            'total_runs': len(all_perf_scores)
+        }
+        
+        # Calculate correlations
+        analysis['correlations'] = {
+            'time_budget_vs_performance': self.safe_correlation(np.array(all_time_budgets), np.array(all_perf_scores)),
+            'time_budget_vs_total_time': self.safe_correlation(np.array(all_time_budgets), np.array(all_total_times)),
+            'time_budget_vs_aide_time': self.safe_correlation(np.array(all_time_budgets), np.array(all_aide_times)),
+            'time_budget_vs_depth': self.safe_correlation(np.array(all_time_budgets), np.array(all_depths)),
+            'time_budget_vs_violations': self.safe_correlation(np.array(all_time_budgets), np.array(all_violations)),
+            'performance_vs_depth': self.safe_correlation(np.array(all_perf_scores), np.array(all_depths)),
+            'performance_vs_violations': self.safe_correlation(np.array(all_perf_scores), np.array(all_violations))
+        }
+        
+        # Log overall statistics
+        self.logger.info("\nOverall Statistics:")
+        self.logger.info(f"  Total Runs: {analysis['overall']['total_runs']}")
+        self.logger.info(f"  Average Performance: {analysis['overall']['performance_score']['mean']:.2f} ± {analysis['overall']['performance_score']['std']:.2f}")
+        self.logger.info(f"  Average Total Time: {analysis['overall']['total_time']['mean']:.1f}s ± {analysis['overall']['total_time']['std']:.1f}s")
+        self.logger.info(f"  Average AIDE Time: {analysis['overall']['aide_time']['mean']:.1f}s ± {analysis['overall']['aide_time']['std']:.1f}s")
+        
+        # Log correlations
+        self.logger.info("\nCorrelations:")
+        for metric, value in analysis['correlations'].items():
+            self.logger.info(f"  {metric}: {value:.3f}")
             
         return analysis
 
     def run_experiment(self, tasks: List[CodingTask], num_runs: int = 1) -> Dict[float, List[TaskResult]]:
-        """Run experiment with multiple runs per time budget
-        
-        Args:
-            tasks: List of coding tasks
-            num_runs: Number of runs per time budget
-            model: Model to use for AIDE (default: llama3.2:1b)
-            
-        Returns:
-            Dictionary mapping time budgets to lists of TaskResult objects
-        """
-
+        """Run experiment with multiple runs per time budget"""
         model = self.model
-
+        
         # Group tasks by time budget
         tasks_by_budget = {}
         for task in tasks:
@@ -1174,22 +1134,34 @@ class ExperimentRunner:
             tasks_by_budget[task.time_budget].append(task)
             
         results = {}
+        total_tasks = sum(len(tasks) for tasks in tasks_by_budget.values())
+        task_count = 0
+        
         for time_budget, budget_tasks in tasks_by_budget.items():
-            self.logger.info(f"\nRunning {num_runs} tasks with {time_budget:.1f} minute budget")
+            self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Running {num_runs} tasks with {time_budget:.1f} minute budget")
             
             # Store results for all runs with this time budget
             budget_results = []
             
             for i, task in enumerate(budget_tasks):
-                self.logger.info(f"\nRun {i+1}/{num_runs}")
+                task_count += 1
+                self.logger.info(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Task {task_count}/{total_tasks} - Run {i+1}/{num_runs}")
+                self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Function: {task.function_name}")
                 
-                # Set up AIDE agent with specified model
-                self.agent = AIDEAgent(model=model)
+                # Set up AIDE agent with specified model and task name
+                self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Initializing AIDE agent with model: {model}")
+                self.agent = AIDEAgent(workspace=self.workspace, model=model, task_name=task.function_name)
                 
                 # Generate implementation
+                self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting function implementation")
+                implementation_start = time.time()
                 code, timing_stats = self.agent.implement_function(task)
+                implementation_time = time.time() - implementation_start
+                self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Implementation completed in {implementation_time:.2f}s")
                 
                 # Evaluate the implementation
+                self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting implementation evaluation")
+                evaluation_start = time.time()
                 result = self.evaluator.evaluate_task(
                     task=task,
                     code=code,
@@ -1198,17 +1170,25 @@ class ExperimentRunner:
                     setup_time=timing_stats['setup_time'],
                     cleanup_time=timing_stats['cleanup_time']
                 )
+                evaluation_time = time.time() - evaluation_start
+                self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Evaluation completed in {evaluation_time:.2f}s")
+                
+                # Save results to CSV
+                self._save_run_results(task, i+1, timing_stats, result)
+                
                 budget_results.append(result)
                 
                 # Log immediate results for this run
-                self.logger.info(f"Total time taken: {timing_stats['total_time']:.1f}s")
-                self.logger.info(f"AIDE execution time: {timing_stats['aide_execution_time']:.1f}s")
-                self.logger.info(f"Setup time: {timing_stats['setup_time']:.1f}s")
-                self.logger.info(f"Cleanup time: {timing_stats['cleanup_time']:.1f}s")
-                self.logger.info(f"Delegation depth: {result.delegation_depth}")
-                self.logger.info(f"Performance score: {result.performance_score:.2f}")
+                self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Run Statistics:")
+                self.logger.info(f"  - Total time: {timing_stats['total_time']:.1f}s")
+                self.logger.info(f"  - AIDE execution: {timing_stats['aide_execution_time']:.1f}s")
+                self.logger.info(f"  - Setup time: {timing_stats['setup_time']:.1f}s")
+                self.logger.info(f"  - Cleanup time: {timing_stats['cleanup_time']:.1f}s")
+                self.logger.info(f"  - Delegation depth: {result.delegation_depth}")
+                self.logger.info(f"  - Performance score: {result.performance_score:.2f}")
+                
                 if result.constraint_violations:
-                    self.logger.info("Constraint violations:")
+                    self.logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Constraint violations:")
                     for violation in result.constraint_violations:
                         self.logger.info(f"  - {violation}")
             
@@ -1223,11 +1203,47 @@ class ExperimentRunner:
             violations = [len(r.constraint_violations) for r in budget_results]
             
             # Log statistics for this time budget
-            self.logger.info(f"\nStatistics for {time_budget} minute budget:")
-            self.logger.info(f"Performance Score: {np.mean(perf_scores):.2f} ± {np.std(perf_scores):.2f}")
-            self.logger.info(f"Total Time: {np.mean(total_times):.1f}s ± {np.std(total_times):.1f}s")
-            self.logger.info(f"AIDE Time: {np.mean(aide_times):.1f}s ± {np.std(aide_times):.1f}s")
-            self.logger.info(f"Delegation Depth: {np.mean(depths):.1f} ± {np.std(depths):.1f}")
-            self.logger.info(f"Violations: {np.mean(violations):.1f} ± {np.std(violations):.1f}")
+            self.logger.info(f"\n[{time.strftime('%Y-%m-%d %H:%M:%S')}] Time Budget {time_budget}m Summary:")
+            self.logger.info(f"  Performance Score: {np.mean(perf_scores):.2f} ± {np.std(perf_scores):.2f}")
+            self.logger.info(f"  Total Time: {np.mean(total_times):.1f}s ± {np.std(total_times):.1f}s")
+            self.logger.info(f"  AIDE Time: {np.mean(aide_times):.1f}s ± {np.std(aide_times):.1f}s")
+            self.logger.info(f"  Delegation Depth: {np.mean(depths):.1f} ± {np.std(depths):.1f}")
+            self.logger.info(f"  Violations: {np.mean(violations):.1f} ± {np.std(violations):.1f}")
             
         return results
+
+def parse_markdown_task(md_file_path):
+    """Parse task definition from markdown file"""
+    with open(md_file_path, 'r') as f:
+        content = f.read()
+    
+    # Extract sections using regex
+    function_name = re.search(r'## Function Name\s+(.+?)\s*(?=##|\Z)', content, re.DOTALL).group(1).strip()
+    description = re.search(r'## Description\s+(.+?)\s*(?=##|\Z)', content, re.DOTALL).group(1).strip()
+    constraints = re.search(r'## Constraints\s+(.+?)\s*(?=##|\Z)', content, re.DOTALL).group(1).strip()
+    
+    # Extract evaluation section if it exists, otherwise use default
+    evaluation_match = re.search(r'## Evaluation\s+(.+?)\s*(?=##|\Z)', content, re.DOTALL)
+    evaluation = evaluation_match.group(1).strip() if evaluation_match else """The implementation will be evaluated based on:
+1. Test case success rate (60%)
+2. Code style and readability (20%)
+3. Implementation efficiency (20%)
+
+The function should handle edge cases gracefully and include proper error handling."""
+    
+    # Extract and parse test cases
+    test_cases_match = re.search(r'## Test Cases\s+```python\s+(.+?)```', content, re.DOTALL)
+    test_cases = ast.literal_eval(test_cases_match.group(1).strip())
+    
+    # Extract and parse constraint setup
+    constraint_setup_match = re.search(r'## Constraint Setup\s+```python\s+(.+?)```', content, re.DOTALL)
+    constraint_setup = ast.literal_eval(constraint_setup_match.group(1).strip())
+    
+    return {
+        'function_name': function_name,
+        'description': description,
+        'constraints': constraints,
+        'evaluation': evaluation,
+        'test_cases': test_cases,
+        'constraint_setup': constraint_setup
+    }

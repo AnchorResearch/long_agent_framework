@@ -1,5 +1,14 @@
-numpy>=1.21.0
-pandas>=1.3.0
+numpy>=1.24.0
+pandas>=2.0.0
+matplotlib>=3.7.0
+seaborn>=0.12.0
+python-dotenv>=1.0.0
+requests>=2.31.0
+psutil>=5.9.0
+humanize>=4.7.0
+shutup>=0.2.0
+google-generativeai>=0.3.0
+dataclasses-json>=0.6.0
 aideml  # Assuming this is published or available
 pytest>=6.0
 black>=22.0

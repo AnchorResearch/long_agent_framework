@@ -1,6 +1,6 @@
 # Long Agent Framework
 
-A research framework for studying the behavior of AI agents running for extended periods, with a focus on constraint maintenance and safety. Developed by [Anchor Research](https://github.com/anchor-research).
+A research framework for studying the behavior of AI agents running for extended periods, with a focus on constraint maintenance and safety. Developed by [Anchor Research](https://github.com/AnchorResearch).
 
 ## Overview
 
