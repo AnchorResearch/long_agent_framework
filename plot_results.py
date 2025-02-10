@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 from pathlib import Path
 import numpy as np
+import argparse
 
 def load_results(csv_path):
     """Load and preprocess the results CSV file"""
@@ -136,28 +137,26 @@ def generate_summary_stats(df):
     
     return summary
 
-def main():
-    # Set up paths
-    workspace_dir = Path(__file__).parent / "experiment_workspace"
-    
-    # Find the most recent experiment directory
-    experiment_dirs = sorted([d for d in workspace_dir.glob("experiment_*") if d.is_dir()], reverse=True)
-    if not experiment_dirs:
-        raise FileNotFoundError("No experiment directories found")
-    
-    latest_exp_dir = experiment_dirs[0]
-    print(f"Using latest experiment directory: {latest_exp_dir}")
-    
+def process_experiment(exp_dir):
+    """Process a single experiment directory"""
     # Find the results file in the experiment directory
-    results_files = list(latest_exp_dir.glob("experiment_results_*.csv"))
+    results_files = list(exp_dir.glob("experiment_results_*.csv"))
     if not results_files:
-        raise FileNotFoundError(f"No results files found in {latest_exp_dir}")
+        print(f"No results files found in {exp_dir}")
+        return False
     
     results_file = results_files[0]
-    plots_dir = latest_exp_dir / "plots"
+    plots_dir = exp_dir / "plots"
+    
+    # Check if plots already exist
+    if plots_dir.exists() and any(plots_dir.iterdir()):
+        print(f"Plots already exist in {exp_dir}, skipping...")
+        return False
     
     # Create plots directory if it doesn't exist
     plots_dir.mkdir(exist_ok=True)
+    
+    print(f"Processing experiment directory: {exp_dir}")
     
     # Load results
     df = load_results(results_file)
@@ -172,16 +171,6 @@ def main():
     # Generate and save summary statistics
     summary_stats = generate_summary_stats(df)
     
-    # Print summary statistics
-    print("\nOverall Statistics:")
-    print("==================")
-    for key, value in summary_stats['Overall Statistics'].items():
-        print(f"{key}: {value:.2f}")
-    
-    print("\nStatistics by Time Budget:")
-    print("=========================")
-    print(summary_stats['By Time Budget'])
-    
     # Save summary statistics to file
     with open(plots_dir / 'summary_statistics.txt', 'w') as f:
         f.write("Overall Statistics:\n")
@@ -192,6 +181,40 @@ def main():
         f.write("\nStatistics by Time Budget:\n")
         f.write("=========================\n")
         f.write(str(summary_stats['By Time Budget']))
+    
+    print(f"Successfully processed {exp_dir}")
+    return True
+
+def main():
+    # Parse command line arguments
+    parser = argparse.ArgumentParser(description='Generate plots for experiment results')
+    parser.add_argument('--all', action='store_true', help='Process all unplotted experiments')
+    args = parser.parse_args()
+    
+    # Set up paths
+    workspace_dir = Path(__file__).parent / "experiment_workspace"
+    
+    # Find experiment directories
+    experiment_dirs = sorted([d for d in workspace_dir.glob("experiment_*") if d.is_dir()], reverse=True)
+    if not experiment_dirs:
+        raise FileNotFoundError("No experiment directories found")
+    
+    if args.all:
+        # Process all experiment directories
+        processed_count = 0
+        for exp_dir in experiment_dirs:
+            if process_experiment(exp_dir):
+                processed_count += 1
+        
+        if processed_count == 0:
+            print("No new experiments to process - all experiments already have plots.")
+        else:
+            print(f"\nProcessed {processed_count} experiment(s)")
+    else:
+        # Process only the latest experiment
+        latest_exp_dir = experiment_dirs[0]
+        print(f"Processing latest experiment directory: {latest_exp_dir}")
+        process_experiment(latest_exp_dir)
 
 if __name__ == "__main__":
     main() 

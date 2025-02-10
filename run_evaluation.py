@@ -109,6 +109,14 @@ def main():
     parser = argparse.ArgumentParser(description='Run evaluation framework')
     parser.add_argument('--task', type=str, required=True,
                        help='Name of the task file (without .md extension) in the tasks directory')
+    parser.add_argument('--n_times', type=int, default=3,
+                       help='Number of different time budgets to test')
+    parser.add_argument('--min_time', type=float, default=1.0,
+                       help='Minimum time budget in minutes')
+    parser.add_argument('--max_time', type=float, default=10.0,
+                       help='Maximum time budget in minutes')
+    parser.add_argument('--n_runs', type=int, default=3,
+                       help='Number of runs per time budget')
     args = parser.parse_args()
     
     # Set up workspace and get experiment directory
@@ -129,17 +137,14 @@ def main():
     task_def = parse_markdown_task(task_file)
     
     # Define test cases with different time budgets (in minutes)
-    n_times = 3
-    min_time = 1.0
-    max_time = 10.0
-    time_budgets = [min_time * np.exp(i * np.log(max_time / min_time)) for i in np.linspace(0, 1, n_times)]
-    num_runs = 3  # Number of runs per time budget
+    time_budgets = [args.min_time * np.exp(i * np.log(args.max_time / args.min_time)) 
+                    for i in np.linspace(0, 1, args.n_times)]
     
     tasks = []
     for time_budget in time_budgets:
-        for run in range(num_runs):
+        for run in range(args.n_runs):
             # Create a simpler task name format, replacing decimal point with underscore
-            task_name = f"{task_def['function_name']}_t{str(time_budget).replace('.', '_')}_r{run+1}"
+            task_name = f"{task_def['function_name']}_t{str(round(time_budget, 1)).replace('.', '_')}_r{run+1}"
             tasks.append(
                 CodingTask(
                     function_name=task_name,
@@ -168,7 +173,7 @@ def main():
     
     # Run experiment with multiple runs per time budget
     logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Starting experiment execution")
-    results = runner.run_experiment(tasks, num_runs)
+    results = runner.run_experiment(tasks, args.n_runs)
     
     # Analyze results
     logger.info(f"[{time.strftime('%Y-%m-%d %H:%M:%S')}] Analyzing experiment results")
